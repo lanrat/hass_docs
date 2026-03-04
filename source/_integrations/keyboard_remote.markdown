@@ -41,13 +41,21 @@ After setup, you can adjust the following options for each device. To access the
 
 {% configuration_basic %}
 Key event types:
-  description: "Which key events the integration listens for. You can select one or more of: `key_up` (key released), `key_down` (key pressed), and `key_hold` (key held down). By default, only `key_up` is enabled. Be aware that `key_hold` can generate a large number of events very quickly."
+  description: "Which key events the integration listens for. You can select one or more of the raw event types (`key_up`, `key_down`, `key_hold`) and the calculated event types (`click`, `double_click`, `long_click`). By default, only `key_up` is enabled. The raw types fire directly from the device input, while the calculated types are derived from press-and-release timing. Be aware that `key_hold` can generate a large number of events very quickly. For more details on the calculated types, see [Click detection](#click-detection) below."
 Emulate key hold:
   description: "When enabled, the integration emulates `key_hold` events in software for devices that do not send them natively. Disabled by default."
 Key hold delay:
   description: "The number of seconds to wait before the first emulated key hold event is fired (0.01 to 5.0 seconds). Only applies when **Emulate key hold** is enabled. Default: 0.250 seconds."
 Key hold repeat interval:
   description: "The number of seconds to wait between subsequent emulated key hold events (0.001 to 1.0 seconds). Only applies when **Emulate key hold** is enabled. Default: 0.033 seconds."
+Click threshold:
+  description: "Maximum press duration in seconds to count as a short click (0.1 to 2.0 seconds). Presses longer than this are evaluated as a long click instead. Only applies when `click` or `long_click` is selected in **Key event types**. Default: 0.400 seconds."
+Double-click timeout:
+  description: "Maximum gap in seconds between two clicks to register as a double-click (0.1 to 1.0 seconds). This adds latency to single-click events, because the system waits for a possible second press before firing a `click` event. Only applies when `double_click` is selected in **Key event types**. Default: 0.300 seconds."
+Long click minimum duration:
+  description: "Minimum press duration in seconds to fire a long-click event (0.1 to 5.0 seconds). Only applies when `long_click` is selected in **Key event types**. Default: 0.400 seconds."
+Long click maximum duration:
+  description: "Maximum press duration in seconds for a long-click event (0.5 to 10.0 seconds). Presses held longer than this do not fire any calculated event, which protects against stuck or accidentally held keys. Only applies when `long_click` is selected in **Key event types**. Default: 3.000 seconds."
 {% endconfiguration_basic %}
 
 ## Events
@@ -63,7 +71,7 @@ To discover the key codes for your device, go to {% my developer_events title="*
 Fired whenever a key event occurs that matches your configured event types.
 
 - `key_code` — The numeric key code (evdev) for the key involved in the event
-- `type` — The event type: `key_up`, `key_down`, or `key_hold`
+- `type` — The event type: `key_up`, `key_down`, `key_hold`, `click`, `double_click`, or `long_click`
 - `device_descriptor` — The `/dev/input/` path of the device
 - `device_name` — The human-readable name of the device
 
@@ -80,6 +88,32 @@ Fired when a configured device is disconnected or removed.
 
 - `device_descriptor` — The `/dev/input/` path of the device
 - `device_name` — The human-readable name of the device
+
+## Click detection
+
+In addition to the raw key events (`key_up`, `key_down`, `key_hold`), the integration can detect higher-level click patterns based on press-and-release timing. These calculated event types let you distinguish between a quick tap, a double-tap, and a long press on the same key, making it easy to assign multiple actions to a single button.
+
+To use click detection, select one or more of the following in the **Key event types** option:
+
+- `click` — A short press-and-release. The press duration must be shorter than the **Click threshold**.
+- `double_click` — Two quick presses in a row, with the gap between them shorter than the **Double-click timeout**.
+- `long_click` — A press held for at least the **Long click minimum duration** but no longer than the **Long click maximum duration**. Presses held beyond the maximum are ignored, which protects against stuck or accidentally held keys.
+
+These calculated events fire on the same `keyboard_remote_command_received` event as raw events. Each key code is tracked independently, so pressing multiple keys at the same time does not interfere with click detection.
+
+{% note %}
+When no calculated event types are selected, the click detection system is completely inactive and has no performance impact. Your existing raw event configurations continue to work unchanged.
+{% endnote %}
+
+### How calculated and raw events interact
+
+Calculated events fire independently of raw events. If you select both `key_up` and `click`, a short press-and-release fires both a raw `key_up` event and a calculated `click` event. You can mix and match raw and calculated types to suit your needs.
+
+The three calculated events are mutually exclusive with each other. A double-click does _not_ also fire two separate click events, and a long-click does _not_ also fire a click.
+
+### Click latency when double-click is enabled
+
+If you select `double_click` alongside `click`, single-click events are slightly delayed. The system needs to wait for the double-click timeout to pass before it can determine whether a press is a single click or the first half of a double-click. If you only need `click` without `double_click`, click events fire immediately on key release with no added delay.
 
 ## Automation examples
 
@@ -109,6 +143,67 @@ automation:
 You can include `device_descriptor` or `device_name` in the event data to target a specific keyboard. This is especially useful when you have multiple Bluetooth remotes controlling different devices. Omit both to trigger the automation for any connected keyboard.
 
 You can also include `type` to limit the trigger to a specific event type, such as `key_down`, `key_up`, or `key_hold`.
+
+### Toggling a light with a click
+
+The following example toggles a light when a key is briefly pressed and released:
+
+```yaml
+automation:
+  - alias: "Toggle living room light on click"
+    triggers:
+      - trigger: event
+        event_type: keyboard_remote_command_received
+        event_data:
+          type: click
+          # 'A' key - find your key code via
+          # Developer Tools > Events
+          key_code: 30
+    actions:
+      - action: light.toggle
+        target:
+          entity_id: light.living_room
+```
+
+### Activating a scene with a double-click
+
+A double-click on the same key can activate a scene, giving you a second action on a single button:
+
+```yaml
+automation:
+  - alias: "Activate movie scene on double-click"
+    triggers:
+      - trigger: event
+        event_type: keyboard_remote_command_received
+        event_data:
+          type: double_click
+          key_code: 30
+    actions:
+      - action: scene.turn_on
+        target:
+          entity_id: scene.movie_mode
+```
+
+### Dimming lights with a long click
+
+A long press can trigger a different action, such as dimming the lights:
+
+```yaml
+automation:
+  - alias: "Dim lights on long click"
+    triggers:
+      - trigger: event
+        event_type: keyboard_remote_command_received
+        event_data:
+          type: long_click
+          key_code: 30
+    actions:
+      - action: light.turn_on
+        target:
+          entity_id: light.living_room
+        data:
+          brightness_pct: 20
+```
 
 ### Responding to device connections and disconnections
 
